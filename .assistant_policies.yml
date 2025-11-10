@@ -1,0 +1,5 @@
+# Assistant project policies
+# This repository requires explicit user permission before any README edits.
+no_edit:
+  - README.md
+
