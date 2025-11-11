@@ -30,6 +30,25 @@ def main():
     print(result["messages"][-1].content)  # noqa: T201
     print("="*80)
 
+    # Segunda etapa: análise dos endpoints extraídos usando o corpus da documentação
+    # Executa o mesmo crawl de forma programática para obter estrutura com corpus e endpoints
+    from .api_docs_agent import crawl_documentation_sync, analyze_endpoints, format_endpoint_analyses
+    crawl_result = crawl_documentation_sync(url, max_depth=3, max_pages=20)
+    endpoints = crawl_result.get("endpoints", [])
+    corpus = crawl_result.get("docs_corpus", "")
+    if endpoints and corpus:
+        analyses = analyze_endpoints(endpoints, corpus)
+        analysis_text = format_endpoint_analyses(analyses)
+
+        print("\n" + "="*80)
+        print("ANÁLISE DOS ENDPOINTS:")
+        print("="*80)
+        print(analysis_text)  # noqa: T201
+        print("="*80)
+
+    else:
+        print("\n[Aviso] Não foi possível obter endpoints ou corpus suficiente para análise.")  # noqa: T201
+
 
 if __name__ == "__main__":
     main()

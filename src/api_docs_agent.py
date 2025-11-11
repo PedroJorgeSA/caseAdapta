@@ -222,6 +222,7 @@ async def crawl_documentation(
     
     all_endpoints = []
     pages_crawled = []
+    corpus_snippets: list[str] = []
     queue = [(start_url, 0)]  # (url, depth)
     
     while queue and len(pages_crawled) < max_pages:
@@ -248,6 +249,9 @@ async def crawl_documentation(
                     'depth': depth,
                     'content_length': len(content)
                 })
+                # Keep a bounded corpus of docs text for later analysis
+                snippet = content[:8000]
+                corpus_snippets.append(snippet)
                 
                 # Extract endpoints from this page
                 endpoints = extract_api_endpoints(content, current_url)
@@ -295,7 +299,8 @@ async def crawl_documentation(
     return {
         'endpoints': list(unique_endpoints.values()),
         'pages_crawled': pages_crawled,
-        'total_endpoints': len(unique_endpoints)
+        'total_endpoints': len(unique_endpoints),
+        'docs_corpus': "\n\n".join(corpus_snippets[:25])  # cap total size
     }
 
 
@@ -341,6 +346,121 @@ def format_endpoints_output(result: dict[str, Any]) -> str:
     
     return "\n".join(output)
 
+
+def analyze_endpoints(endpoints: list[dict[str, Any]], docs_corpus: str) -> list[dict[str, Any]]:
+    """Heuristically describe each endpoint using docs corpus.
+
+    Extracts: short description, path params and their meaning, and common usage hints.
+    """
+    analyses: list[dict[str, Any]] = []
+
+    # Precompute a simplified corpus for fuzzy matching
+    normalized_corpus = docs_corpus
+
+    for ep in endpoints:
+        method = ep['method']
+        path = ep['path']
+        full_url = ep['full_url']
+
+        # Detect path params like {id} or :id
+        params = re.findall(r"\{([^}]+)\}", path)
+        if not params:
+            params = re.findall(r":([A-Za-z0-9_]+)", path)
+
+        # Try to locate a nearby description in the corpus around the path
+        desc = ""
+        try:
+            # Look for occurrences of the path or tail segments
+            path_tail = path.split("/")[-1]
+            candidates = [
+                re.escape(path),
+                re.escape(path_tail),
+            ]
+            # Build a small window around the first match
+            match_pos = -1
+            for pat in candidates:
+                m = re.search(pat, normalized_corpus, re.IGNORECASE)
+                if m:
+                    match_pos = m.start()
+                    break
+            if match_pos >= 0:
+                start = max(0, match_pos - 300)
+                end = min(len(normalized_corpus), match_pos + 500)
+                window = normalized_corpus[start:end]
+                # Try to pull a sentence around it
+                sentences = re.split(r"(?<=[.!?])\s+", window)
+                # Choose a sentence that contains the path tail or method
+                picked = ""
+                for s in sentences:
+                    if path_tail.lower() in s.lower() or method in s.upper():
+                        picked = s.strip()
+                        if len(picked) > 20:
+                            break
+                desc = picked or window.strip()
+        except Exception:
+            desc = ""
+
+        # Clean and condense description
+        if desc:
+            # Remove excessive whitespace
+            desc = re.sub(r"\s+", " ", desc).strip()
+            # Trim overly long snippets
+            if len(desc) > 280:
+                desc = desc[:277] + "..."
+
+        # Compose a human-readable hint about params
+        param_hint = ""
+        if params:
+            # Create a simple hint about replacing params
+            pretty_params = ", ".join(params)
+            param_hint = f"Path params: {pretty_params}. Replace each placeholder with the corresponding value (e.g., IDs, keys)."
+
+        # Default description if nothing found
+        if not desc:
+            # Provide a generic action based on method
+            action = {
+                "GET": "retrieves",
+                "POST": "creates",
+                "PUT": "replaces",
+                "PATCH": "updates",
+                "DELETE": "deletes",
+            }.get(method, "operates on")
+            desc = f"{method} {path} {action} the resource. {param_hint}".strip()
+
+        analyses.append({
+            "method": method,
+            "path": path,
+            "full_url": full_url,
+            "description": desc,
+            "params": params,
+        })
+
+    return analyses
+
+
+def format_endpoint_analyses(analyses: list[dict[str, Any]]) -> str:
+    """Render endpoint analyses in a readable form."""
+    lines: list[str] = []
+    lines.append("=" * 80)
+    lines.append("API ENDPOINTS ANALYSIS")
+    lines.append("=" * 80)
+
+    # Group by method for readability
+    by_method: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in analyses:
+        by_method[item["method"]].append(item)
+
+    for method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']:
+        if method in by_method:
+            lines.append(f"\n{method} ({len(by_method[method])})")
+            lines.append("-" * 80)
+            for item in sorted(by_method[method], key=lambda x: x["path"]):
+                lines.append(f"{method:6} {item['path']}")
+                lines.append(f"  URL: {item['full_url']}")
+                lines.append(f"  What it does: {item['description']}")
+                if item["params"]:
+                    lines.append(f"  Path params: {', '.join(item['params'])}")
+    return "\n".join(lines)
 
 def api_docs_node(state: MessagesState) -> dict[str, list[AnyMessage]]:
     """Node that crawls documentation and extracts API endpoints."""
